@@ -38,6 +38,12 @@
 - Built with TypeScript and the official MCP SDK
 - **Configurable timeout protection** with automatic process abortion
 - **Graceful timeout handling** - attempts to kill hanging processes before closing connections
+- **Enhanced security features**:
+  - Environment variable support for sensitive data (passwords)
+  - Command whitelist/blacklist for access control
+  - Audit logging for command execution tracking
+  - Sanitized error messages to prevent information leakage
+  - Base64 encoding for password transmission
 
 ### Tools
 
@@ -94,6 +100,8 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
 - `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
+- `commandWhitelist`: Comma-separated list of allowed command patterns (regex supported). Only commands matching these patterns will be allowed.
+- `commandBlacklist`: Comma-separated list of blocked command patterns (regex supported). Commands matching these patterns will be blocked.
 
 
 ```commandline
@@ -148,6 +156,26 @@ claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.1
 **With Sudo and Su Support:**
 ```bash
 claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --sudoPassword=sudo_pass --suPassword=root_pass
+```
+
+**Using Environment Variables (Recommended for security):**
+```bash
+export SSH_HOST=192.168.1.100
+export SSH_USER=admin
+export SSH_PASSWORD=your_password
+export SSH_SUDO_PASSWORD=sudo_pass
+export SSH_COMMAND_WHITELIST="ls,cat,grep,docker"
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp
+```
+
+**With Command Whitelist:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --commandWhitelist="^ls.*,cat.*,grep.*"
+```
+
+**With Command Blacklist:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --commandBlacklist="rm,shutdown,reboot,sudo"
 ```
 
 **Installation Scopes:**

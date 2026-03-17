@@ -28,15 +28,24 @@ const isTestMode = process.env.SSH_MCP_TEST === '1';
 const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
 const argvConfig = (isCliEnabled || isTestMode) ? parseArgv() : {} as Record<string, string>;
 
-const HOST = argvConfig.host;
-const PORT = argvConfig.port ? parseInt(argvConfig.port) : 22;
-const USER = argvConfig.user;
-const PASSWORD = argvConfig.password;
-const SUPASSWORD = argvConfig.suPassword;
-const SUDOPASSWORD = argvConfig.sudoPassword;
+// Support both command line arguments and environment variables for sensitive data
+// Environment variables take precedence for security
+const HOST = argvConfig.host || process.env.SSH_HOST;
+const PORT = argvConfig.port ? parseInt(argvConfig.port) : (process.env.SSH_PORT ? parseInt(process.env.SSH_PORT) : 22);
+const USER = argvConfig.user || process.env.SSH_USER;
+const PASSWORD = process.env.SSH_PASSWORD || argvConfig.password;
+const SUPASSWORD = process.env.SSH_SU_PASSWORD || argvConfig.suPassword;
+const SUDOPASSWORD = process.env.SSH_SUDO_PASSWORD || argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
-const KEY = argvConfig.key;
+const KEY = argvConfig.key || process.env.SSH_KEY;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
+// Command whitelist and blacklist for security
+const COMMAND_WHITELIST = process.env.SSH_COMMAND_WHITELIST ? 
+  process.env.SSH_COMMAND_WHITELIST.split(',').map(p => p.trim()) : 
+  (argvConfig.commandWhitelist ? argvConfig.commandWhitelist.split(',').map(p => p.trim()) : undefined);
+const COMMAND_BLACKLIST = process.env.SSH_COMMAND_BLACKLIST ? 
+  process.env.SSH_COMMAND_BLACKLIST.split(',').map(p => p.trim()) : 
+  (argvConfig.commandBlacklist ? argvConfig.commandBlacklist.split(',').map(p => p.trim()) : undefined);
 // Max characters configuration:
 // - Default: 1000 characters
 // - When set via --maxChars:
@@ -99,11 +108,82 @@ function sanitizePassword(password: string | undefined): string | undefined {
   return password;
 }
 
+// Enhanced password escaping for shell commands
+function escapePasswordForShell(password: string): string {
+  // Use base64 encoding to avoid shell injection issues
+  return Buffer.from(password, 'utf8').toString('base64');
+}
+
+// Audit logging (without sensitive data)
+function auditLog(level: 'INFO' | 'WARN' | 'ERROR', event: string, details?: any): void {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level,
+    event,
+    details: details ? JSON.stringify(details) : undefined
+  };
+  
+  // Write to stderr to avoid interfering with MCP communication
+  console.error(JSON.stringify(logEntry));
+}
+
+// Command validation against whitelist and blacklist
+function validateCommand(command: string): void {
+  const baseCommand = command.trim().split(/\s+/)[0]; // Get the first word (base command)
+  
+  // Read whitelist from environment variables dynamically
+  const whitelist = process.env.SSH_COMMAND_WHITELIST ? 
+    process.env.SSH_COMMAND_WHITELIST.split(',').map(p => p.trim()) : 
+    COMMAND_WHITELIST;
+  
+  const blacklist = process.env.SSH_COMMAND_BLACKLIST ? 
+    process.env.SSH_COMMAND_BLACKLIST.split(',').map(p => p.trim()) : 
+    COMMAND_BLACKLIST;
+  
+  // Check whitelist first
+  if (whitelist && whitelist.length > 0) {
+    const isAllowed = whitelist.some(pattern => {
+      try {
+        const regex = new RegExp(pattern);
+        return regex.test(command) || regex.test(baseCommand);
+      } catch (e) {
+        // Invalid regex pattern, treat as literal match
+        return pattern === command || pattern === baseCommand;
+      }
+    });
+    
+    if (!isAllowed) {
+      throw new Error(`Command '${baseCommand}' is not in the whitelist`);
+    }
+  }
+  
+  // Then check blacklist
+  if (blacklist && blacklist.length > 0) {
+    const isBlocked = blacklist.some(pattern => {
+      try {
+        const regex = new RegExp(pattern);
+        return regex.test(command) || regex.test(baseCommand);
+      } catch (e) {
+        // Invalid regex pattern, treat as literal match
+        return pattern === command || pattern === baseCommand;
+      }
+    });
+    
+    if (isBlocked) {
+      throw new Error(`Command '${baseCommand}' is blocked by the blacklist`);
+    }
+  }
+}
+
 // Escape command for use in shell contexts (like pkill)
 export function escapeCommandForShell(command: string): string {
   // Replace single quotes with escaped single quotes
   return command.replace(/'/g, "'\"'\"'");
 }
+
+// Export additional functions for testing
+export { escapePasswordForShell, validateCommand, auditLog };
 
 // SSH Connection Manager to maintain persistent connection
 export interface SSHConfig {
@@ -287,7 +367,8 @@ export class SSHConnectionManager {
             clearTimeout(timeoutId);
             cleanup();
             this.suPromise = null;
-            reject(new McpError(ErrorCode.InternalError, `su authentication failed: ${buffer}`));
+            // Sanitize error message to prevent information leakage
+            reject(new McpError(ErrorCode.InternalError, 'su authentication failed'));
             return;
           }
         };
@@ -357,6 +438,17 @@ server.tool(
   async ({ command, description }) => {
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
+    
+    // Validate command against whitelist and blacklist
+    validateCommand(sanitizedCommand);
+    
+    // Audit log command execution (without sensitive data)
+    auditLog('INFO', 'command_execution', { 
+      command: sanitizedCommand,
+      tool: 'exec',
+      user: USER,
+      host: HOST
+    });
 
     try {
       // Initialize connection manager if not already done
@@ -428,6 +520,17 @@ if (!DISABLE_SUDO) {
     },
     async ({ command, description }) => {
       const sanitizedCommand = sanitizeCommand(command);
+      
+      // Validate command against whitelist and blacklist
+      validateCommand(sanitizedCommand);
+      
+      // Audit log command execution (without sensitive data)
+      auditLog('INFO', 'command_execution', { 
+        command: sanitizedCommand,
+        tool: 'sudo-exec',
+        user: USER,
+        host: HOST
+      });
 
       try {
         if (!connectionManager) {
@@ -481,10 +584,9 @@ if (!DISABLE_SUDO) {
           // No password provided, use -n to fail if sudo requires a password
           wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
         } else {
-          // Password provided — pipe it into sudo using printf. This avoids complex
-          // PTY/stdin handling on the SSH channel and is simpler and more reliable.
-          const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
-          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+          // Password provided — use base64 encoding to avoid shell injection
+          const pwdEncoded = escapePasswordForShell(sudoPassword);
+          wrapped = `echo '${pwdEncoded}' | base64 -d | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
         }
 
         return await execSshCommandWithConnection(connectionManager, wrapped);
@@ -516,22 +618,26 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
     // If we have an active su shell, use it directly (commands run as root in session)
     if (shell) {
       let buffer = '';
+      const uniqueMarker = `__COMMAND_COMPLETE_${Date.now()}__`;
 
       const dataHandler = (data: Buffer) => {
         const text = data.toString();
         buffer += text;
 
-        // Wait for root prompt (#) to know command is complete
-        // Match # which indicates root prompt (may be followed by spaces, escape codes, etc)
-        if (/#/.test(buffer)) {
+        // Wait for our unique marker to know command is complete
+        // This is more reliable than matching # which could appear in command output
+        if (buffer.includes(uniqueMarker)) {
           if (!isResolved) {
             isResolved = true;
             clearTimeout(timeoutId);
 
-            // Extract output: remove the command echo and final prompt
+            // Extract output: remove the command echo, marker, and final prompt
             const lines = buffer.split('\n');
-            // First line is often the echoed command; last line is the prompt
-            let output = lines.slice(1, -1).join('\n');
+            // Remove first line (echoed command) and lines containing our marker
+            let output = lines
+              .slice(1)
+              .filter(line => !line.includes(uniqueMarker))
+              .join('\n');
 
             resolve({
               content: [{
@@ -545,8 +651,8 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
       };
 
       shell.on('data', dataHandler);
-      // Send command immediately; shell is ready after elevation
-      shell.write(command + '\n');
+      // Send command with unique marker
+      shell.write(`${command}\necho ${uniqueMarker}\n`);
       return;
     }
 
