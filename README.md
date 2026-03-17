@@ -11,6 +11,8 @@
 
 [![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/tufantunc/ssh-mcp)](https://archestra.ai/mcp-catalog/tufantunc__ssh-mcp)
 
+**Language**: [English](README.md) | [繁體中文](README.zh-TW.md)
+
 **SSH MCP Server** is a local Model Context Protocol (MCP) server that exposes SSH control for Linux and Windows systems, enabling LLMs and other MCP clients to execute shell commands securely via SSH.
 
 ## Contents
@@ -44,6 +46,7 @@
   - Audit logging for command execution tracking
   - Sanitized error messages to prevent information leakage
   - Base64 encoding for password transmission
+  - Enhanced prompt detection using unique markers
 
 ### Tools
 
@@ -214,6 +217,42 @@ You can use the [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspe
 ```sh
 npm run inspect
 ```
+
+## Security Best Practices
+
+### Environment Variables (Recommended)
+For better security, use environment variables instead of command-line arguments for sensitive data:
+
+```bash
+export SSH_HOST=your-server.com
+export SSH_USER=your-username
+export SSH_PASSWORD=your-password
+export SSH_SUDO_PASSWORD=your-sudo-password
+export SSH_SU_PASSWORD=your-su-password
+export SSH_COMMAND_WHITELIST="ls,cat,grep,docker,^ps.*"
+export SSH_COMMAND_BLACKLIST="rm,shutdown,reboot,sudo"
+```
+
+### Command Access Control
+- **Whitelist**: Only allow specific commands or patterns
+  ```bash
+  --commandWhitelist="ls,cat,grep,docker,^ps.*,^tail.*"
+  ```
+- **Blacklist**: Block dangerous commands
+  ```bash
+  --commandBlacklist="rm,shutdown,reboot,sudo,dd,format"
+  ```
+
+### Audit Logging
+All command executions are logged to stderr in JSON format:
+```json
+{"timestamp":"2024-01-01T12:00:00.000Z","level":"INFO","event":"command_execution","details":"{\"command\":\"ls -la\",\"tool\":\"exec\",\"user\":\"admin\",\"host\":\"server.com\"}"}
+```
+
+### Password Security
+- Passwords are base64 encoded when transmitted to avoid shell injection
+- Error messages are sanitized to prevent information leakage
+- Consider using SSH keys instead of passwords for better security
 
 ## Disclaimer
 
