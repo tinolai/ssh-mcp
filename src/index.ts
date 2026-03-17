@@ -5,6 +5,79 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+// Fix __dirname for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load configuration from file
+function loadConfigFile(): Record<string, any> | null {
+  const configPaths = [
+    path.join(process.cwd(), 'ssh_config.json'),
+    path.join(__dirname, '..', 'ssh_config.json'),
+    path.join(process.env.HOME || '', '.ssh_mcp', 'ssh_config.json')
+  ];
+  
+  for (const configPath of configPaths) {
+    try {
+      if (fs.existsSync(configPath)) {
+        const configContent = fs.readFileSync(configPath, 'utf8');
+        const config = JSON.parse(configContent);
+        console.error(`Loaded configuration from: ${configPath}`);
+        return config;
+      }
+    } catch (e) {
+      console.error(`Failed to load config from ${configPath}:`, e);
+    }
+  }
+  
+  return null;
+}
+
+// Merge configurations with priority: CLI args > config file > environment variables
+function mergeConfigurations(argvConfig: Record<string, string | null>, fileConfig: Record<string, any> | null) {
+  const merged: Record<string, any> = {};
+  
+  // Start with file config if exists
+  if (fileConfig) {
+    Object.assign(merged, fileConfig);
+    
+    // Handle security section
+    if (fileConfig.security) {
+      if (fileConfig.security.commandWhitelist) {
+        merged.commandWhitelist = fileConfig.security.commandWhitelist.join(',');
+      }
+      if (fileConfig.security.commandBlacklist) {
+        merged.commandBlacklist = fileConfig.security.commandBlacklist.join(',');
+      }
+    }
+  }
+  
+  // Override with environment variables
+  if (process.env.SSH_HOST) merged.host = process.env.SSH_HOST;
+  if (process.env.SSH_PORT) merged.port = process.env.SSH_PORT;
+  if (process.env.SSH_USER) merged.user = process.env.SSH_USER;
+  if (process.env.SSH_PASSWORD) merged.password = process.env.SSH_PASSWORD;
+  if (process.env.SSH_KEY) merged.key = process.env.SSH_KEY;
+  if (process.env.SSH_SUDO_PASSWORD) merged.sudoPassword = process.env.SSH_SUDO_PASSWORD;
+  if (process.env.SSH_SU_PASSWORD) merged.suPassword = process.env.SSH_SU_PASSWORD;
+  if (process.env.SSH_TIMEOUT) merged.timeout = process.env.SSH_TIMEOUT;
+  if (process.env.SSH_MAX_CHARS) merged.maxChars = process.env.SSH_MAX_CHARS;
+  if (process.env.SSH_COMMAND_WHITELIST) merged.commandWhitelist = process.env.SSH_COMMAND_WHITELIST;
+  if (process.env.SSH_COMMAND_BLACKLIST) merged.commandBlacklist = process.env.SSH_COMMAND_BLACKLIST;
+  
+  // Finally override with CLI arguments
+  for (const [key, value] of Object.entries(argvConfig)) {
+    if (value !== null) {
+      merged[key] = value;
+    }
+  }
+  
+  return merged;
+}
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
 function parseArgv() {
@@ -28,41 +101,47 @@ const isTestMode = process.env.SSH_MCP_TEST === '1';
 const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
 const argvConfig = (isCliEnabled || isTestMode) ? parseArgv() : {} as Record<string, string>;
 
-// Support both command line arguments and environment variables for sensitive data
-// Environment variables take precedence for security
-const HOST = argvConfig.host || process.env.SSH_HOST;
-const PORT = argvConfig.port ? parseInt(argvConfig.port) : (process.env.SSH_PORT ? parseInt(process.env.SSH_PORT) : 22);
-const USER = argvConfig.user || process.env.SSH_USER;
-const PASSWORD = process.env.SSH_PASSWORD || argvConfig.password;
-const SUPASSWORD = process.env.SSH_SU_PASSWORD || argvConfig.suPassword;
-const SUDOPASSWORD = process.env.SSH_SUDO_PASSWORD || argvConfig.sudoPassword;
-const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
-const KEY = argvConfig.key || process.env.SSH_KEY;
-const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
+// Load configuration file
+const fileConfig = loadConfigFile();
+
+// Merge all configurations
+const config = mergeConfigurations(argvConfig, fileConfig);
+
+// Extract configuration values with priority: CLI args > config file > environment variables
+const HOST = config.host;
+const PORT = config.port ? parseInt(config.port) : 22;
+const USER = config.user;
+const PASSWORD = config.password;
+const SUPASSWORD = config.suPassword;
+const SUDOPASSWORD = config.sudoPassword;
+const DISABLE_SUDO = config.disableSudo !== undefined;
+const KEY = config.key;
+const DEFAULT_TIMEOUT = config.timeout ? parseInt(config.timeout) : 60000; // 60 seconds default timeout
+
 // Command whitelist and blacklist for security
-const COMMAND_WHITELIST = process.env.SSH_COMMAND_WHITELIST ? 
-  process.env.SSH_COMMAND_WHITELIST.split(',').map(p => p.trim()) : 
-  (argvConfig.commandWhitelist ? argvConfig.commandWhitelist.split(',').map(p => p.trim()) : undefined);
-const COMMAND_BLACKLIST = process.env.SSH_COMMAND_BLACKLIST ? 
-  process.env.SSH_COMMAND_BLACKLIST.split(',').map(p => p.trim()) : 
-  (argvConfig.commandBlacklist ? argvConfig.commandBlacklist.split(',').map(p => p.trim()) : undefined);
+const COMMAND_WHITELIST = config.commandWhitelist ? 
+  config.commandWhitelist.split(',').map((p: string) => p.trim()) : undefined;
+const COMMAND_BLACKLIST = config.commandBlacklist ? 
+  config.commandBlacklist.split(',').map((p: string) => p.trim()) : undefined;
 // Max characters configuration:
 // - Default: 1000 characters
 // - When set via --maxChars:
 //   * a positive integer enforces that limit
 //   * 0 or a negative value disables the limit (no max)
 //   * the string "none" (case-insensitive) disables the limit (no max)
-const MAX_CHARS_RAW = argvConfig.maxChars;
+const MAX_CHARS_RAW = config.maxChars;
 const MAX_CHARS = (() => {
   if (typeof MAX_CHARS_RAW === 'string') {
     const lowered = MAX_CHARS_RAW.toLowerCase();
-    if (lowered === 'none') return Infinity;
-    const parsed = parseInt(MAX_CHARS_RAW);
-    if (isNaN(parsed)) return 1000;
-    if (parsed <= 0) return Infinity;
-    return parsed;
+    if (lowered === 'none') return undefined;
+    const num = parseInt(lowered);
+    if (isNaN(num)) return 1000;
+    return num <= 0 ? undefined : num;
   }
-  return 1000;
+  if (typeof MAX_CHARS_RAW === 'number') {
+    return MAX_CHARS_RAW <= 0 ? undefined : MAX_CHARS_RAW;
+  }
+  return 1000; // default
 })();
 
 function validateConfig(config: Record<string, string | null>) {
@@ -143,7 +222,7 @@ function validateCommand(command: string): void {
   
   // Check whitelist first
   if (whitelist && whitelist.length > 0) {
-    const isAllowed = whitelist.some(pattern => {
+    const isAllowed = whitelist.some((pattern: string) => {
       try {
         const regex = new RegExp(pattern);
         return regex.test(command) || regex.test(baseCommand);
@@ -160,7 +239,7 @@ function validateCommand(command: string): void {
   
   // Then check blacklist
   if (blacklist && blacklist.length > 0) {
-    const isBlocked = blacklist.some(pattern => {
+    const isBlocked = blacklist.some((pattern: string) => {
       try {
         const regex = new RegExp(pattern);
         return regex.test(command) || regex.test(baseCommand);

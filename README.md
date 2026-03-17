@@ -240,7 +240,11 @@ export SSH_COMMAND_BLACKLIST="rm,shutdown,reboot,sudo"
   ```
 - **Blacklist**: Block dangerous commands
   ```bash
-  --commandBlacklist="rm,shutdown,reboot,sudo,dd,format"
+  --commandBlacklist="rm,dd,format,fdisk,shutdown,reboot,sudo,passwd,chmod,chown"
+  ```
+- **Recommended default blacklist** for security:
+  ```bash
+  export SSH_COMMAND_BLACKLIST="rm,dd,format,fdisk,shutdown,reboot,halt,poweroff,sudo,su,passwd,chmod,chown,mkfs,fsck"
   ```
 
 ### Audit Logging
